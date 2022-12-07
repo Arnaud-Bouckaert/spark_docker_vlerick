@@ -1,5 +1,4 @@
-# Building solid data pipelines with PySpark
-# I HATE GITHUB AAAAAARGH
+# CLOUD SOLUTIONS AND MODERN DATA PLATFORMS
 
 📚 A course brought to you by the [Data Minded Academy].
 
