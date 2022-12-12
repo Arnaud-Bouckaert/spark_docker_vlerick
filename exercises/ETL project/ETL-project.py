@@ -16,6 +16,7 @@ spark = SparkSession.builder.config(conf=conf).getOrCreate()
 #Read files from S3 bucker
 dfpre_spark = spark.read.csv(f"s3a://{BUCKET}/{KEYpre}", header=True)
 dfafter_spark = spark.read.csv(f"s3a://{BUCKET}/{KEYafter}", header=True)
+dfpre_spark.show()
 
 #Transform DataFrames to Pandas
 dfpre = dfpre_spark.toPandas()
@@ -52,8 +53,8 @@ from sklearn import preprocessing
 from sklearn import utils
 from sklearn.tree import DecisionTreeClassifier
 from sklearn import metrics
-
-
+from xgboost import XGBClassifier
+import xgboost as xgb
 
 # ## Merging the two dataframes and Visual exploration
 
@@ -65,7 +66,6 @@ from sklearn import metrics
 
 
 data = pd.merge(dfafter, dfpre, on='movie_title', how="inner")
-data.shape
 
 
 # # Data cleaning
@@ -86,8 +86,13 @@ data = data.drop(["gross", "num_critic_for_reviews", "movie_title", "num_voted_u
 # In[19]:
 
 
-data.duplicated(keep="first")
+data = data.duplicated(keep="first")
 
+
+# #### Comment
+# 
+# Remove content_rating because of its missing values; We could opt to replace the missing values with the most common values, but this potentially drastically changes how the movie will be evaluated by the model!
+# 
 
 # In[21]:
 
@@ -95,10 +100,14 @@ data.duplicated(keep="first")
 data = data.drop(["content_rating"], axis=1)
 
 
+# #### Comment
+# 
+# Drop the few left-over lines with missing values!
+
 # In[24]:
 
 
-data.dropna(inplace=True)
+data = data.dropna(inplace=True)
 
 
 # In[32]:
@@ -107,13 +116,21 @@ data.dropna(inplace=True)
 data = data.drop(["director_name","actor_1_name", "actor_2_name", "actor_3_name"], axis=1)
 
 
+# #### Comment
+# 
+# Keep every language that has a presence of >1% in the dataset as a seperate value, put other languages in a new category: other_language
+
 # In[35]:
 
 
 vals_l = data["language"].value_counts()[:3].index
-print (vals_l)
 data['language'] = data.language.where(data.language.isin(vals_l), 'other_language')
 
+
+
+# #### Comment
+# 
+# Transform the language column into dummies and add them to the dataframe!
 
 # In[37]:
 
@@ -124,6 +141,11 @@ print(data_l.toarray())
 data[ohe.categories_[0]] = data_l.toarray()
 
 
+# #### Comment
+# 
+# Keep every country that has a presence of >1% in the dataset as a seperate value, put other languages in a new category: other_country
+# 
+
 # In[39]:
 
 
@@ -131,6 +153,10 @@ vals_l = data["country"].value_counts()[:6].index
 print (vals_l)
 data['country'] = data.country.where(data.country.isin(vals_l), 'other_country')
 
+
+# #### Comment
+# 
+# Transform the country column into dummies and add them to the dataframe!
 
 # In[41]:
 
@@ -141,17 +167,29 @@ print(data_c.toarray())
 data[ohe.categories_[0]] = data_c.toarray()
 
 
+# #### Comment
+# 
+# Drop language and country after inserting their respective dummies.
+
 # In[42]:
 
 
 data = data.drop(["language", "country"], axis=1)
 
 
+# #### Comment
+# 
+# Drop 1 random dummy from language and 1 random dummy from country to account for the coëfficient
+
 # In[43]:
 
 
 data = data.drop(["other_language", "other_country"], axis=1)
 
+
+# #### Comment
+# 
+# Split up the genres into dummies!
 
 # In[46]:
 
@@ -162,12 +200,18 @@ data = pd.concat(combined_frames, axis = 1)
 data = data.drop('genres', axis = 1)
 
 
+# #### Comment
+# 
+# Drop actor_1_facebook_likes, actor_2_facebook_likes and actor_3_facebook_likes to anticipate multicollinearity with cast_total_facebook_likes
+
 # In[47]:
 
 
 data = data.drop(["actor_1_facebook_likes", "actor_2_facebook_likes", "actor_3_facebook_likes"], axis=1)
-data.shape
 
+
+# # Linear prediction methods:
+# Below, you are able to find models to predict the exact imdb_score a movie would have.
 
 # ## Final preprocessing
 
@@ -192,157 +236,69 @@ seed = 123
 x_train, x_val, y_train, y_val = train_test_split(x,y,test_size=0.15, random_state = seed)
 
 
-# # Classification
+# ## Linear Regression 
 
-# In[57]:
+# #### Comment
+# 
+# Below I add an intercept to X and train the model
 
-
-data["imdb_score_classes"]=pd.cut(data['imdb_score'], bins=[0,5,7,10], right=True, labels=False)
-data
-
-
-# ## Final preprocessing
-
-# In[59]:
+# In[52]:
 
 
-data_c = data.drop(["imdb_score"], axis=1)
+xc_train = sm.add_constant(x_train)
+xc_val = sm.add_constant(x_val)
+
+mod = sm.OLS(y_train, xc_train)
+olsm = mod.fit()
 
 
-# In[60]:
+# #### Comment
+# In the next step I predict the values and add these to a seperate dataframe so that I can easily use acces the predicted values in the future if necessary.
+
+# In[53]:
 
 
-x = data_c.drop(["imdb_score_classes"], axis=1) 
-y = data_c["imdb_score_classes"]
+array_pred = np.round(olsm.predict(xc_val),1) 
+
+y_pred = pd.DataFrame({"y_pred": array_pred},index=x_val.index) 
+val_pred_linreg = pd.concat([y_val,y_pred,x_val],axis=1)
 
 
-# In[61]:
+# #### Comment
+# Below I evaluate the model, calculating the R-square and the mean absolute error.
+
+# In[54]:
 
 
-seed = 123 
-x_train, x_val, y_train, y_val = train_test_split(x,y,test_size=0.15, random_state = seed)
+act_value = val_pred_linreg["imdb_score"]
+pred_value = val_pred_linreg["y_pred"]
+rsquare = r2_score(act_value, pred_value)
+mae = mean_absolute_error(act_value, pred_value)
+pd.DataFrame({'eval_criteria': ['r-square','MAE'],'value':[rsquare,mae]})
 
+# Auxiliar functions
+def equivalent_type(f):
+    if f == 'datetime64[ns]': return TimestampType()
+    elif f == 'int64': return LongType()
+    elif f == 'int32': return IntegerType()
+    elif f == 'float64': return DoubleType()
+    elif f == 'float32': return FloatType()
+    else: return StringType()
 
-# In[62]:
+def define_structure(string, format_type):
+    try: typo = equivalent_type(format_type)
+    except: typo = StringType()
+    return StructField(string, typo)
 
+# Given pandas dataframe, it will return a spark's dataframe.
+def pandas_to_spark(pandas_df):
+    columns = list(pandas_df.columns)
+    types = list(pandas_df.dtypes)
+    struct_list = []
+    for column, typo in zip(columns, types): 
+      struct_list.append(define_structure(column, typo))
+    p_schema = StructType(struct_list)
+    return sqlContext.createDataFrame(pandas_df, p_schema)
 
-sc_x = StandardScaler()
-x_train = sc_x.fit_transform(x_train)
-x_val = sc_x.transform(x_val)
-
-
-# In[ ]:
-
-
-def make_confusion_matrix(cf,
-                          group_names=None,
-                          categories='auto',
-                          count=True,
-                          percent=True,
-                          cbar=True,
-                          xyticks=True,
-                          xyplotlabels=True,
-                          sum_stats=True,
-                          figsize=None,
-                          cmap='Blues',
-                          title=None):
-    '''
-    This function will make a pretty plot of an sklearn Confusion Matrix cm using a Seaborn heatmap visualization.
-    Arguments
-    ---------
-    cf:            confusion matrix to be passed in
-    group_names:   List of strings that represent the labels row by row to be shown in each square.
-    categories:    List of strings containing the categories to be displayed on the x,y axis. Default is 'auto'
-    count:         If True, show the raw number in the confusion matrix. Default is True.
-    normalize:     If True, show the proportions for each category. Default is True.
-    cbar:          If True, show the color bar. The cbar values are based off the values in the confusion matrix.
-                   Default is True.
-    xyticks:       If True, show x and y ticks. Default is True.
-    xyplotlabels:  If True, show 'True Label' and 'Predicted Label' on the figure. Default is True.
-    sum_stats:     If True, display summary statistics below the figure. Default is True.
-    figsize:       Tuple representing the figure size. Default will be the matplotlib rcParams value.
-    cmap:          Colormap of the values displayed from matplotlib.pyplot.cm. Default is 'Blues'
-                   See http://matplotlib.org/examples/color/colormaps_reference.html
-                   
-    title:         Title for the heatmap. Default is None.
-    '''
-
-
-    # CODE TO GENERATE TEXT INSIDE EACH SQUARE
-    blanks = ['' for i in range(cf.size)]
-
-    if group_names and len(group_names)==cf.size:
-        group_labels = ["{}\n".format(value) for value in group_names]
-    else:
-        group_labels = blanks
-
-    if count:
-        group_counts = ["{0:0.0f}\n".format(value) for value in cf.flatten()]
-    else:
-        group_counts = blanks
-
-    if percent:
-        group_percentages = ["{0:.2%}".format(value) for value in cf.flatten()/np.sum(cf)]
-    else:
-        group_percentages = blanks
-
-    box_labels = [f"{v1}{v2}{v3}".strip() for v1, v2, v3 in zip(group_labels,group_counts,group_percentages)]
-    box_labels = np.asarray(box_labels).reshape(cf.shape[0],cf.shape[1])
-
-
-    # CODE TO GENERATE SUMMARY STATISTICS & TEXT FOR SUMMARY STATS
-    if sum_stats:
-        #Accuracy is sum of diagonal divided by total observations
-        accuracy  = np.trace(cf) / float(np.sum(cf))
-
-        #if it is a binary confusion matrix, show some more stats
-        if len(cf)==2:
-            #Metrics for Binary Confusion Matrices
-            precision = cf[1,1] / sum(cf[:,1])
-            recall    = cf[1,1] / sum(cf[1,:])
-            f1_score  = 2*precision*recall / (precision + recall)
-            stats_text = "\n\nAccuracy={:0.3f}\nPrecision={:0.3f}\nRecall={:0.3f}\nF1 Score={:0.3f}".format(
-                accuracy,precision,recall,f1_score)
-        else:
-            stats_text = "\n\nAccuracy={:0.3f}".format(accuracy)
-    else:
-        stats_text = ""
-
-
-    # SET FIGURE PARAMETERS ACCORDING TO OTHER ARGUMENTS
-    if figsize==None:
-        #Get default figure size if not set
-        figsize = plt.rcParams.get('figure.figsize')
-
-    if xyticks==False:
-        #Do not show categories if xyticks is False
-        categories=False
-
-
-    # MAKE THE HEATMAP VISUALIZATION
-    plt.figure(figsize=figsize)
-    sns.heatmap(cf,annot=box_labels,fmt="",cmap=cmap,cbar=cbar,xticklabels=categories,yticklabels=categories)
-
-    if xyplotlabels:
-        plt.ylabel('True label')
-        plt.xlabel('Predicted label' + stats_text)
-    else:
-        plt.xlabel(stats_text)
-    
-    if title:
-        plt.title(title)
-
-
-# ## Logistic regression
-
-# In[64]:
-
-
-logit =LogisticRegression()
-logit.fit(x_train,np.ravel(y_train,order='C'))
-y_pred=logit.predict(x_val)
-cnf_matrix = metrics.confusion_matrix(y_val, y_pred)
-make_confusion_matrix(cnf_matrix, figsize = (10,10))
-
-predictions = createDataFrame(y_pred)
-y_pred.show()
+# predictions = createDataFrame(val_pred_linreg)
+# val_pred_linreg.show()
