@@ -1,6 +1,11 @@
 from pyspark import SparkConf
 from pyspark.sql import SparkSession
+from pyspark.sql.types import *
+from pyspark.sql import Row
 import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
 
 BUCKET = "dmacademy-course-assets"
 KEYafter = "vlerick/after_release.csv"
@@ -19,264 +24,63 @@ dfafter_spark = spark.read.csv(f"s3a://{BUCKET}/{KEYafter}", header=True)
 dfpre_spark.show()
 
 #Transform DataFrames to Pandas
-dfpre = dfpre_spark.toPandas()
-dfafter = dfafter_spark.toPandas()
+df_pre = dfpre_spark.toPandas()
+df_post= dfafter_spark.toPandas()
 
-#!/usr/bin/env python
-# coding: utf-8
+# IMDB CODE
 
-# # Introduction
-# I am an entrenpreneur, trying to make it in the movie-world. I want to distinguish myself by offering specific services as a movie consultant. I want my speciality to be that I am able to make predictions of what imdb-score a movie will have. In this way, I hope to offer my services to movie-production companies, directors, actors... I hope to be able to predict what budget, cast, duration, language... the movie needs to have in order to score high!
-# 
-# My customers can invoke my services e.g. as a director/actor who only wants to have high-rated movies on his resume, as a production company to try and make a popular/high rated movie...
+df = df_pre.merge(df_post, on='movie_title', how='inner')
+df = df.drop(columns = ["num_critic_for_reviews","gross","movie_title","num_voted_users","num_user_for_reviews","movie_facebook_likes"])
 
-# In[1]:
+df.drop_duplicates(inplace = True)
 
+df = df.drop(columns = ["director_name","actor_1_name","actor_2_name","actor_3_name"])
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.preprocessing import LabelEncoder, StandardScaler, MinMaxScaler, OneHotEncoder
-import statsmodels.api as sm
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score
-from sklearn.metrics import mean_absolute_error 
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
-from sklearn.metrics import roc_auc_score
-from sklearn.metrics import confusion_matrix
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn import preprocessing
-from sklearn import utils
-from sklearn.tree import DecisionTreeClassifier
-from sklearn import metrics
-from xgboost import XGBClassifier
-import xgboost as xgb
+df['content_rating'].fillna('R', inplace=True)
+df['language'].fillna('English', inplace=True)
 
-# ## Merging the two dataframes and Visual exploration
+df["actor_1_facebook_likes"].fillna(653.813397, inplace=True)
+df["actor_2_facebook_likes"].fillna(438.397510, inplace=True)
+df["actor_3_facebook_likes"].fillna(299.271593, inplace=True)
+df.dropna()
 
-# #### Comment
-# 
-# You do an inner join because not all the movie titles from the dfpre are in the dfafter, so you take a shortcut and don't need to clean these out!
+for i in ["UK","France","Germany","Spain","Italy","Norway","Denmark","Ireland","Netherlands","Romania","Sweden","Iceland","West Germany","Slovenia","Poland","Czech Republic","Bulgaria","Belgium"]:
+    c = df["country"] != i
+    df["country"].where(c, "Europe", inplace = True)
+cat = ["USA","Europe"]
+df['country'] = df.country.where(df.country.isin(cat), 'other')
 
-# In[9]:
+l = df["language"] == "English"
+df["language"].where(l, "Other", inplace = True)
 
+x = df.drop(columns = ["imdb_score","content_rating"])
+y = df["imdb_score"] 
 
-data = pd.merge(dfafter, dfpre, on='movie_title', how="inner")
+x = pd.concat([x, x['genres'].str.get_dummies(sep='|')], axis=1)
+x = x.drop("genres",axis = 1)
 
+x_head_cat = ["language","country"]
+x_head_num = x.columns[~x.columns.isin(x_head_cat)]
 
-# # Data cleaning
-
-# #### Comment
-# 
-# Remove the columns which where part of after-release data that will not be predicted. 
-
-# In[17]:
-
-
-data = data.drop(["gross", "num_critic_for_reviews", "movie_title", "num_voted_users", "num_user_for_reviews", "movie_facebook_likes"], axis=1)
-
-
-# #### Comment
-# Remove potential duplicates
-
-# In[19]:
-
-
-data = data.duplicated(keep="first")
-
-
-# #### Comment
-# 
-# Remove content_rating because of its missing values; We could opt to replace the missing values with the most common values, but this potentially drastically changes how the movie will be evaluated by the model!
-# 
-
-# In[21]:
-
-
-data = data.drop(["content_rating"], axis=1)
-
-
-# #### Comment
-# 
-# Drop the few left-over lines with missing values!
-
-# In[24]:
-
-
-data = data.dropna(inplace=True)
-
-
-# In[32]:
-
-
-data = data.drop(["director_name","actor_1_name", "actor_2_name", "actor_3_name"], axis=1)
-
-
-# #### Comment
-# 
-# Keep every language that has a presence of >1% in the dataset as a seperate value, put other languages in a new category: other_language
-
-# In[35]:
-
-
-vals_l = data["language"].value_counts()[:3].index
-data['language'] = data.language.where(data.language.isin(vals_l), 'other_language')
-
-
-
-# #### Comment
-# 
-# Transform the language column into dummies and add them to the dataframe!
-
-# In[37]:
-
-
-ohe = OneHotEncoder()
-data_l = ohe.fit_transform(data[['language']])
-print(data_l.toarray())
-data[ohe.categories_[0]] = data_l.toarray()
-
-
-# #### Comment
-# 
-# Keep every country that has a presence of >1% in the dataset as a seperate value, put other languages in a new category: other_country
-# 
-
-# In[39]:
-
-
-vals_l = data["country"].value_counts()[:6].index
-print (vals_l)
-data['country'] = data.country.where(data.country.isin(vals_l), 'other_country')
-
-
-# #### Comment
-# 
-# Transform the country column into dummies and add them to the dataframe!
-
-# In[41]:
-
-
-ohe = OneHotEncoder()
-data_c = ohe.fit_transform(data[['country']])
-print(data_c.toarray())
-data[ohe.categories_[0]] = data_c.toarray()
-
-
-# #### Comment
-# 
-# Drop language and country after inserting their respective dummies.
-
-# In[42]:
-
-
-data = data.drop(["language", "country"], axis=1)
-
-
-# #### Comment
-# 
-# Drop 1 random dummy from language and 1 random dummy from country to account for the coëfficient
-
-# In[43]:
-
-
-data = data.drop(["other_language", "other_country"], axis=1)
-
-
-# #### Comment
-# 
-# Split up the genres into dummies!
-
-# In[46]:
-
-
-data_g = data['genres'].str.get_dummies(sep = '|')
-combined_frames = [data, data_g]
-data = pd.concat(combined_frames, axis = 1)
-data = data.drop('genres', axis = 1)
-
-
-# #### Comment
-# 
-# Drop actor_1_facebook_likes, actor_2_facebook_likes and actor_3_facebook_likes to anticipate multicollinearity with cast_total_facebook_likes
-
-# In[47]:
-
-
-data = data.drop(["actor_1_facebook_likes", "actor_2_facebook_likes", "actor_3_facebook_likes"], axis=1)
-
-
-# # Linear prediction methods:
-# Below, you are able to find models to predict the exact imdb_score a movie would have.
-
-# ## Final preprocessing
-
-# #### Comment
-# 
-# Define dependent and independent variables
-
-# In[50]:
-
-
-x = data.drop(["imdb_score"], axis=1) 
-y = data["imdb_score"]
-
-
-# #### Comment
-# Split into training and validation dataset
-
-# In[51]:
-
+def encode_and_bind(original_dataframe, feature_to_encode):
+    dummies = pd.get_dummies(original_dataframe[[feature_to_encode]])
+    del dummies[dummies.columns[0]] 
+    res = pd.concat([original_dataframe, dummies], axis=1)
+    res.drop(feature_to_encode, axis=1, inplace=True) 
+    return(res)
+for categorical_feature in x_head_cat:
+    x[categorical_feature] = x[categorical_feature].astype('category')
+    x = encode_and_bind(x,categorical_feature)
 
 seed = 123 
-x_train, x_val, y_train, y_val = train_test_split(x,y,test_size=0.15, random_state = seed)
+x_train, x_val, y_train, y_val = train_test_split(x,y,test_size=0.3, random_state = seed)
 
+rfreg = RandomForestRegressor(max_depth=10, min_samples_leaf =1, random_state=0).fit(x_train, y_train)
 
-# ## Linear Regression 
+array_pred = np.round(rfreg.predict(x_val),0)
+y_pred = pd.DataFrame({"y_pred": array_pred},index=x_val.index) #index must be same as original database
+val_pred = pd.concat([y_val,y_pred,x_val],axis=1)
 
-# #### Comment
-# 
-# Below I add an intercept to X and train the model
-
-# In[52]:
-
-
-xc_train = sm.add_constant(x_train)
-xc_val = sm.add_constant(x_val)
-
-mod = sm.OLS(y_train, xc_train)
-olsm = mod.fit()
-
-
-# #### Comment
-# In the next step I predict the values and add these to a seperate dataframe so that I can easily use acces the predicted values in the future if necessary.
-
-# In[53]:
-
-
-array_pred = np.round(olsm.predict(xc_val),1) 
-
-y_pred = pd.DataFrame({"y_pred": array_pred},index=x_val.index) 
-val_pred_linreg = pd.concat([y_val,y_pred,x_val],axis=1)
-
-
-# #### Comment
-# Below I evaluate the model, calculating the R-square and the mean absolute error.
-
-# In[54]:
-
-
-act_value = val_pred_linreg["imdb_score"]
-pred_value = val_pred_linreg["y_pred"]
-rsquare = r2_score(act_value, pred_value)
-mae = mean_absolute_error(act_value, pred_value)
-pd.DataFrame({'eval_criteria': ['r-square','MAE'],'value':[rsquare,mae]})
-
-# Auxiliar functions
 def equivalent_type(f):
     if f == 'datetime64[ns]': return TimestampType()
     elif f == 'int64': return LongType()
@@ -290,7 +94,7 @@ def define_structure(string, format_type):
     except: typo = StringType()
     return StructField(string, typo)
 
-# Given pandas dataframe, it will return a spark's dataframe.
+
 def pandas_to_spark(pandas_df):
     columns = list(pandas_df.columns)
     types = list(pandas_df.dtypes)
@@ -298,7 +102,4 @@ def pandas_to_spark(pandas_df):
     for column, typo in zip(columns, types): 
       struct_list.append(define_structure(column, typo))
     p_schema = StructType(struct_list)
-    return sqlContext.createDataFrame(pandas_df, p_schema)
-
-# predictions = createDataFrame(val_pred_linreg)
-# val_pred_linreg.show()
+    return spark.createDataFrame(pandas_df, p_schema)
