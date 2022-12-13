@@ -103,3 +103,6 @@ def pandas_to_spark(pandas_df):
       struct_list.append(define_structure(column, typo))
     p_schema = StructType(struct_list)
     return spark.createDataFrame(pandas_df, p_schema)
+
+val_pred = pandas_to_spark(val_pred)
+val_pred.write.json(f"s3a://{BUCKET}/vlerick/Arnaud_Bouckaert2")
